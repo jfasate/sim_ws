@@ -14,5 +14,7 @@ We obtain:
 The code has been implemented in both Python3 (under `scripts/wall_follow_node.py`) and C++ (under `src/safety_node.cpp`). Both have the same functionalities.
 
 ### Starting Up the Node
-- To start up the Python node, run `ros2 run safety_node safety_node.py`
-- To start up the C++ node, run `ros2 run safety_node safety_node`
+- To start up the Python node, run
+```
+ros2 run safety_node safety_node.py
+```
