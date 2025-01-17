@@ -68,3 +68,9 @@ We will also add Speed control for when we are driving straight vs. turning:
 4. Run $D_{t+1}$ through the PID algorithm described above to get a steering angle.
 5. Use the steering angle you computed in the previous step to compute a safe driving speed.
 6. Publish the steering angle and driving speed to the `/drive` topic in simulation.
+
+
+## Run
+```
+ros2 run wall_follow wall_follow_node.py
+```
