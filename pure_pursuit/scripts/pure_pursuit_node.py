@@ -27,9 +27,9 @@ class PurePursuit(Node):
         self.map_name = 'levine_2nd'
 
         # Topics & Subs, Pubs
-        drive_topic = '/drive'
-        odom_topic = '/pf/viz/inferred_pose' if self.is_real else '/ego_racecar/odom'
-        visualization_topic = '/visualization_marker_array'
+        drive_topic = '/drive' #Publisher
+        odom_topic = '/pf/viz/inferred_pose' if self.is_real else '/ego_racecar/odom' #Subscriber
+        visualization_topic = '/visualization_marker_array' #Publisher
 
         # Subscribe to POSE
         self.sub_pose = self.create_subscription(PoseStamped if self.is_real else Odometry, odom_topic, self.pose_callback, 1)
