@@ -3,6 +3,7 @@
 import numpy as np
 from scipy.spatial import distance, transform
 import os
+import yaml
 
 import rclpy
 from rclpy.node import Node
@@ -24,12 +25,12 @@ class PurePursuit(Node):
 
         self.is_real = False
         self.is_ascending = True  # waypoint indices are ascending during tracking
-        self.map_name = 'levine_2nd'
+        self.map_name = 'test_worldv2'
 
         # Topics & Subs, Pubs
-        drive_topic = '/drive' #Publisher
-        odom_topic = '/pf/viz/inferred_pose' if self.is_real else '/ego_racecar/odom' #Subscriber
-        visualization_topic = '/visualization_marker_array' #Publisher
+        drive_topic = '/drive'
+        odom_topic = '/pf/viz/inferred_pose' if self.is_real else '/ego_racecar/odom'
+        visualization_topic = '/visualization_marker_array'
 
         # Subscribe to POSE
         self.sub_pose = self.create_subscription(PoseStamped if self.is_real else Odometry, odom_topic, self.pose_callback, 1)
@@ -41,13 +42,32 @@ class PurePursuit(Node):
         self.markerArray = MarkerArray()
 
         #Waypoints
-        map_path = os.path.abspath(os.path.join('src', 'csv_data'))
-        csv_data = np.loadtxt(map_path + '/' + self.map_name + '.csv', delimiter=';', skiprows=0)  # csv data
-        self.waypoints = csv_data[:, 1:3]  # first row is indices
-        self.numWaypoints = self.waypoints.shape[0]
-        
-        # self.ref_speed = csv_data[:, 5] * 0.6  # max speed for levine 2nd - real is 2m/s
-        self.ref_speed = csv_data[:, 5]  # max speed - sim is 10m/s
+        yaml_path = f'/sim_ws/src/csv_data/{self.map_name}.yaml'
+        try:
+            with open(yaml_path, 'r') as file:
+                trajectory_data = yaml.safe_load(file)
+            
+            # Extract waypoints and create numpy array
+            waypoints = []
+            speeds = []
+            for point in trajectory_data:
+                x = float(point['position']['x'])
+                y = float(point['position']['y'])
+                waypoints.append([x, y])
+                # Calculate speed based on orientation (you might want to adjust this)
+                speeds.append(1.0)  # Default speed, adjust as needed
+            
+            self.waypoints = np.array(waypoints, dtype=np.float64)
+            self.ref_speed = np.array(speeds, dtype=np.float64)
+            self.numWaypoints = len(waypoints)
+            
+            print(f"Loaded {self.numWaypoints} waypoints from {yaml_path}")
+            
+        except Exception as e:
+            print(f"Error loading waypoints: {e}")
+            self.waypoints = np.array([[0.0, 0.0]], dtype=np.float64)
+            self.ref_speed = np.array([0.0], dtype=np.float64)
+            self.numWaypoints = 1
 
         self.visualization_init()
 
