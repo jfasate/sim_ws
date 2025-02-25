@@ -4,7 +4,7 @@
   <name>gap_follow</name>
   <version>0.0.0</version>
   <description>f1tenth gap_follow lab</description>
-  <maintainer email="s36gong@uwaterloo.ca">Steven Gong</maintainer>
+  <maintainer email="jfasate@purdue.edu">Jayesh Fasate</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
