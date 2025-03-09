@@ -107,7 +107,7 @@ class WallFollow(Node):
         # TODO: Use kp, ki & kd to implement a PID controller
         self.error = error
         self.integral += self.ki * self.error * delta_t
-        angle = self.kp * self.error + np.clip(self.integral, -1, +1) + self.kd * (self.error - self.prev_error) / delta_t
+        angle = self.kp * self.error + np.clip(self.integral, -1, +1) + self.kd * (self.error - self.prev_error) / delta_t #Cal steering angle
         self.prev_error = self.error
 
         # print(front_beam)
