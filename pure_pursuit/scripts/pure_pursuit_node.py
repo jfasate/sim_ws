@@ -97,9 +97,9 @@ class PurePursuit(Node):
         self.rot = R.as_matrix()
 
         # Find closest waypoint to where we are
-        self.distances = distance.cdist(self.currPos, self.waypoints, 'euclidean').reshape((self.numWaypoints))
-        self.closest_index = np.argmin(self.distances)
-        self.closestPoint = self.waypoints[self.closest_index]
+        self.distances = distance.cdist(self.currPos, self.waypoints, 'euclidean').reshape((self.numWaypoints)) #cal euclidean dist betn current position and every waypoint (out in 1D array).
+        self.closest_index = np.argmin(self.distances) #find the index with lowest value.
+        self.closestPoint = self.waypoints[self.closest_index] #retrive the corrdinate of the closest waypoint.
 
         # Find target point
         targetPoint = self.get_closest_point_beyond_lookahead_dist(self.L)
