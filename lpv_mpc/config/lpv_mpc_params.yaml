@@ -1,0 +1,39 @@
+lpv_mpc_node:
+  ros__parameters:
+    # Waypoint / track
+    map_name: 'icra'
+    csv_path: ''          # Leave empty to auto-resolve from src/csv_data/<map_name>.csv
+    speed_scale: 0.60      # Scale waypoint speeds (start conservative, increase once stable)
+
+    # ROS topics
+    odom_topic: '/ego_racecar/odom'
+    drive_topic: '/drive'
+
+    # QP solver ('cvxopt', 'osqp', 'ecos', 'scs')
+    qp_solver: 'cvxopt'
+
+    # MPC timing
+    Ts: 0.02              # Sample time [s] (50 Hz control loop)
+    hz: 20                # Prediction horizon [steps] (20 * 0.02s = 0.4s)
+
+    # F1Tenth vehicle parameters (from f110_gym simulator)
+    m: 3.74               # Mass [kg]
+    Iz: 0.04712           # Yaw moment of inertia [kg*m^2]
+    Cf: 123.0             # Front cornering stiffness [N/rad]
+    Cr: 131.0             # Rear cornering stiffness [N/rad]
+    lf: 0.15875           # CG to front axle [m]
+    lr: 0.17145           # CG to rear axle [m]
+    mju: 0.015            # Rolling resistance coefficient
+
+    # MPC cost weights (diagonal entries)
+    #   Q, S: output weights for [x_dot, psi, X, Y]
+    #   R:    input-rate weights for [d_delta, d_a]
+    #   Q/S: [x_dot_weight, psi_weight, X_weight, Y_weight]
+    #   R:   [d_delta_weight, d_accel_weight]
+    #   High x_dot weight → track CSV speed profile (slows for curves)
+    #   High psi weight   → follow heading (prevents oversteer/understeer)
+    #   Moderate X/Y      → follow position without oscillation
+    #   High R[0]         → smooth steering (prevents oscillation)
+    Q_diag: [500.0, 2500.0, 1200.0, 1200.0]
+    S_diag: [500.0, 2500.0, 1200.0, 1200.0]
+    R_diag: [55.0, 8.0]
