@@ -80,7 +80,7 @@ class MPC(Node):
         super().__init__('mpc_node')
         # use the MPC as a tracker (similar to pure pursuit)
         self.is_real = False
-        self.map_name = 'levine_2nd'
+        self.map_name = 'icra'
 
         # create ROS subscribers and publishers
         pose_topic = "/pf/viz/inferred_pose" if self.is_real else "/ego_racecar/odom"
