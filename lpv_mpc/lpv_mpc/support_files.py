@@ -53,10 +53,98 @@ class SupportFilesF1Tenth:
             'outputs': outputs, 'inputs': inputs, 'hz': hz,
         }
 
+        # Precompute all matrices that do NOT depend on the vehicle state or
+        # inputs. In the LPV-MPC only the per-step linearization (A_aug, B_aug)
+        # and the resulting prediction matrices (Cdb, Adc) change each tick;
+        # the cost blocks (Qdb, Tdb, Rdb), the constraint-selection matrix
+        # (C_asterisk_global), the rate-limit bounds and the identity blocks
+        # are constant for a fixed horizon. Building them once removes a large
+        # chunk of per-tick Python allocation and block-assignment work.
+        self._precompute_constant_matrices()
+
+    def _precompute_constant_matrices(self):
+        """Build the state-independent QP matrices a single time.
+
+        The output matrix C (and hence the augmented C_aug) is constant, so
+        the cost-weight blocks CQC = C_aug.T Q C_aug etc. are constant too.
+        """
+        Q = self.constants['Q']
+        S = self.constants['S']
+        R = self.constants['R']
+        hz = self.constants['hz']
+        inputs = self.constants['inputs']
+        n_out = self.constants['outputs']
+
+        n_states = 6
+        n_aug = n_states + inputs        # 8
+        n_constr = 4
+
+        # Constant output selection C and its augmented form C_aug = [C, 0].
+        C = np.array([
+            [1, 0, 0, 0, 0, 0],
+            [0, 0, 1, 0, 0, 0],
+            [0, 0, 0, 0, 1, 0],
+            [0, 0, 0, 0, 0, 1],
+        ], dtype=float)
+        C_aug = np.hstack([C, np.zeros((n_out, inputs))])
+
+        CQC = C_aug.T @ Q @ C_aug
+        CSC = C_aug.T @ S @ C_aug
+        QC = Q @ C_aug
+        SC = S @ C_aug
+
+        # Block-diagonal cost matrices (terminal step uses S instead of Q).
+        Qdb = np.zeros((n_aug * hz, n_aug * hz))
+        Tdb = np.zeros((n_out * hz, n_aug * hz))
+        Rdb = np.zeros((inputs * hz, inputs * hz))
+        for i in range(hz):
+            r0, c0 = n_aug * i, n_aug * i
+            Qdb[r0:r0 + n_aug, c0:c0 + n_aug] = CSC if i == hz - 1 else CQC
+            r0t = n_out * i
+            Tdb[r0t:r0t + n_out, c0:c0 + n_aug] = SC if i == hz - 1 else QC
+            r0r = inputs * i
+            Rdb[r0r:r0r + inputs, r0r:r0r + inputs] = R
+
+        # Constraint selection: picks [x_dot, y_dot, delta, a] from x_aug.
+        C_asterisk = np.array([
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 1, 0],
+            [0, 0, 0, 0, 0, 0, 0, 1],
+        ], dtype=float)
+        C_asterisk_global = np.zeros((n_constr * hz, n_aug * hz))
+        for i in range(hz):
+            C_asterisk_global[n_constr * i:n_constr * i + n_constr,
+                              n_aug * i:n_aug * i + n_aug] = C_asterisk
+
+        # Input-rate limits (constant per sample): [d_delta, d_a].
+        d_delta_max = np.pi / 90     # ~0.035 rad/step
+        d_a_max = 0.5                # m/s^2 per step
+        ub_global = np.empty(inputs * hz)
+        ub_global[0::2] = d_delta_max
+        ub_global[1::2] = d_a_max
+        lb_global = ub_global.copy()
+        ublb_global = np.concatenate((ub_global, lb_global))
+
+        I_global = np.eye(inputs * hz)
+        I_mega_global = np.vstack((I_global, -I_global))
+
+        # Stash for use each tick.
+        self._n_aug = n_aug
+        self._n_constr = n_constr
+        self._Qdb = Qdb
+        self._Tdb = Tdb
+        self._Rdb = Rdb
+        self._C_asterisk = C_asterisk
+        self._C_asterisk_global = C_asterisk_global
+        self._ublb_global = ublb_global
+        self._I_mega_global = I_mega_global
+
     def state_space(self, states, delta, a):
         """Linearize the dynamic bicycle model around the current operating point.
 
-        Returns discrete-time (Ad, Bd, Cd, Dd) via forward Euler.
+        Returns discrete-time (Ad, Bd, Cd, Dd) via the bilinear (Tustin)
+        transform — i.e. trapezoidal integration of the continuous model.
         """
         g = self.constants['g']
         m = self.constants['m']
@@ -73,10 +161,11 @@ class SupportFilesF1Tenth:
         psi = states[2]
 
         # Protect against low longitudinal velocity.
-        # At low speed the terms ~1/x_dot make the A matrix stiff;
-        # forward-Euler discretization becomes unstable when
-        # |A44| * Ts > 2, i.e. x_dot < (Cf*lf^2+Cr*lr^2)/(Iz * 2/Ts).
-        # For F1Tenth params this critical speed is ~1.2 m/s.
+        # The continuous A matrix has ~1/x_dot terms that blow up as
+        # x_dot -> 0, independent of the discretization scheme. The Tustin
+        # transform below is A-stable (so it no longer imposes a stability
+        # floor the way forward Euler did), but this clamp is still needed
+        # to keep the continuous model itself well-conditioned at low speed.
         x_dot = max(x_dot, 1.5)
 
         # Continuous-time A matrix entries
@@ -123,9 +212,16 @@ class SupportFilesF1Tenth:
         ])
         D = np.zeros((4, 2))
 
-        # Forward Euler discretization
-        Ad = np.eye(6) + Ts * A
-        Bd = Ts * B
+        # Bilinear (Tustin) discretization via trapezoidal integration:
+        #   Ad = (I - Ts/2 A)^-1 (I + Ts/2 A)
+        #   Bd = (I - Ts/2 A)^-1 (Ts B)
+        # Solve against the same (I - Ts/2 A) factor rather than forming an
+        # explicit inverse (more numerically stable).
+        I6 = np.eye(6)
+        half = 0.5 * Ts
+        M_lhs = I6 - half * A
+        Ad = np.linalg.solve(M_lhs, I6 + half * A)
+        Bd = np.linalg.solve(M_lhs, Ts * B)
         Cd = C
         Dd = D
 
@@ -165,9 +261,6 @@ class SupportFilesF1Tenth:
         """
         A_aug, B_aug, C_aug, D_aug = self.augmented_matrices(Ad, Bd, Cd, Dd)
 
-        Q = self.constants['Q']
-        S = self.constants['S']
-        R = self.constants['R']
         Cf = self.constants['Cf']
         g = self.constants['g']
         m = self.constants['m']
@@ -175,79 +268,30 @@ class SupportFilesF1Tenth:
         lf = self.constants['lf']
         inputs = self.constants['inputs']
 
-        n_aug = A_aug.shape[0]  # 8
-        n_out = C_aug.shape[0]  # 4
-
-        # ======================== Constraints ========================
-        # Input rate limits (per sample)
-        d_delta_max = np.pi / 90     # ~0.035 rad/step  (~1.75 rad/s)
-        d_a_max = 0.5                # m/s^2 per step
-
-        ub_global = np.zeros(inputs * hz)
-        lb_global = np.zeros(inputs * hz)
-        for i in range(inputs * hz):
-            if i % 2 == 0:  # steering rate
-                ub_global[i] = d_delta_max
-                lb_global[i] = d_delta_max
-            else:            # accel rate
-                ub_global[i] = d_a_max
-                lb_global[i] = d_a_max
-
-        ublb_global = np.concatenate((ub_global, lb_global))
-
-        I_global = np.eye(inputs * hz)
-        I_mega_global = np.vstack((I_global, -I_global))
-
-        # State/input constraint selection matrix
-        # Constrains: [x_dot, y_dot, delta, a] from augmented state
-        C_asterisk = np.array([
-            [1, 0, 0, 0, 0, 0, 0, 0],
-            [0, 1, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 1, 0],
-            [0, 0, 0, 0, 0, 0, 0, 1],
-        ], dtype=float)
-
-        n_constr = C_asterisk.shape[0]  # 4
-        C_asterisk_global = np.zeros((n_constr * hz, n_aug * hz))
-
-        y_asterisk_max_global = []
-        y_asterisk_min_global = []
-
-        # ======================== Cost matrices ========================
-        CQC = C_aug.T @ Q @ C_aug
-        CSC = C_aug.T @ S @ C_aug
-        QC = Q @ C_aug
-        SC = S @ C_aug
-
-        Qdb = np.zeros((n_aug * hz, n_aug * hz))
-        Tdb = np.zeros((n_out * hz, n_aug * hz))
-        Rdb = np.zeros((inputs * hz, inputs * hz))
-        Cdb = np.zeros((n_aug * hz, inputs * hz))
-        Adc = np.zeros((n_aug * hz, n_aug))
+        # Constant matrices precomputed once in __init__.
+        n_aug = self._n_aug          # 8
+        n_constr = self._n_constr    # 4
+        Qdb = self._Qdb
+        Tdb = self._Tdb
+        Rdb = self._Rdb
+        C_asterisk_global = self._C_asterisk_global
 
         # ======================== LPV prediction ========================
-        A_product = A_aug.copy()
-        states_predicted_aug = x_aug_t.copy()
+        # Per-tick state-dependent work: store the step linearizations, the
+        # homogeneous propagation chain (Adc), and the per-step state-constraint
+        # bounds. The cost / selection / rate-limit matrices are constant and
+        # already built in __init__.
+        Adc = np.zeros((n_aug * hz, n_aug))
         A_aug_collection = np.zeros((hz, n_aug, n_aug))
         B_aug_collection = np.zeros((hz, n_aug, inputs))
+        y_asterisk_max_global = np.zeros(n_constr * hz)
+        y_asterisk_min_global = np.zeros(n_constr * hz)
+
+        A_product = A_aug.copy()
+        states_predicted_aug = x_aug_t.copy()
 
         for i in range(hz):
-            # Cost matrices
-            if i == hz - 1:
-                r0, c0 = n_aug * i, n_aug * i
-                Qdb[r0:r0 + n_aug, c0:c0 + n_aug] = CSC
-                r0t, c0t = n_out * i, n_aug * i
-                Tdb[r0t:r0t + n_out, c0t:c0t + n_aug] = SC
-            else:
-                r0, c0 = n_aug * i, n_aug * i
-                Qdb[r0:r0 + n_aug, c0:c0 + n_aug] = CQC
-                r0t, c0t = n_out * i, n_aug * i
-                Tdb[r0t:r0t + n_out, c0t:c0t + n_aug] = QC
-
-            r0r, c0r = inputs * i, inputs * i
-            Rdb[r0r:r0r + inputs, c0r:c0r + inputs] = R
-
-            # LPV: store current matrices and predicted propagation
+            # LPV: store current step linearization and predicted propagation
             Adc[n_aug * i:n_aug * i + n_aug, :] = A_product
             A_aug_collection[i] = A_aug
             B_aug_collection[i] = B_aug
@@ -255,28 +299,24 @@ class SupportFilesF1Tenth:
             # ==================== State constraints ====================
             x_dot_pred = max(states_predicted_aug[0][0], 1.5)
 
-            x_dot_max = 8.0
+            x_dot_max = 12.0
             y_dot_max = min(0.17 * x_dot_pred, 2.0)
             delta_max = 0.4189   # ~24 deg
             Fyf = Cf * (states_predicted_aug[6][0]
                         - states_predicted_aug[1][0] / x_dot_pred
                         - lf * states_predicted_aug[3][0] / x_dot_pred)
-            a_max = 3.0 + (Fyf * np.sin(states_predicted_aug[6][0]) + mju * m * g) / m \
-                    - states_predicted_aug[3][0] * states_predicted_aug[1][0]
+            a_bias = (Fyf * np.sin(states_predicted_aug[6][0]) + mju * m * g) / m \
+                - states_predicted_aug[3][0] * states_predicted_aug[1][0]
+            a_max = 3.0 + a_bias
 
             x_dot_min = 0.5
             y_dot_min = max(-0.17 * x_dot_pred, -2.0)
             delta_min = -0.4189
-            a_min = -3.0 + (Fyf * np.sin(states_predicted_aug[6][0]) + mju * m * g) / m \
-                    - states_predicted_aug[3][0] * states_predicted_aug[1][0]
+            a_min = -3.0 + a_bias
 
-            y_asterisk_max = np.array([x_dot_max, y_dot_max, delta_max, a_max])
-            y_asterisk_min = np.array([x_dot_min, y_dot_min, delta_min, a_min])
-            y_asterisk_max_global = np.concatenate((y_asterisk_max_global, y_asterisk_max))
-            y_asterisk_min_global = np.concatenate((y_asterisk_min_global, y_asterisk_min))
-
-            C_asterisk_global[n_constr * i:n_constr * i + n_constr,
-                              n_aug * i:n_aug * i + n_aug] = C_asterisk
+            j0 = n_constr * i
+            y_asterisk_max_global[j0:j0 + n_constr] = (x_dot_max, y_dot_max, delta_max, a_max)
+            y_asterisk_min_global[j0:j0 + n_constr] = (x_dot_min, y_dot_min, delta_min, a_min)
 
             # ==================== LPV: predict next step ====================
             if i < hz - 1:
@@ -291,17 +331,22 @@ class SupportFilesF1Tenth:
                 A_aug, B_aug, C_aug, D_aug = self.augmented_matrices(Ad_i, Bd_i, Cd_i, Dd_i)
                 A_product = A_aug @ A_product
 
-        # Build Cdb (lower-triangular block matrix of A^(i-j) * B products)
+        # ======================== Prediction matrix Cdb ========================
+        # Block recursion (same math, far fewer Python-level matmuls than the
+        # original O(hz^2) double loop):
+        #   Cdb[i, i] = B_i
+        #   Cdb[i, j] = A_i @ Cdb[i-1, j]   for j < i
+        # so the whole filled portion of each row is one matmul against the
+        # previous row instead of an inner loop over j.
+        Cdb = np.zeros((n_aug * hz, inputs * hz))
         for i in range(hz):
-            for j in range(i + 1):
-                AB_product = np.eye(n_aug)
-                for ii in range(i, j - 1, -1):
-                    if ii > j:
-                        AB_product = AB_product @ A_aug_collection[ii]
-                    else:
-                        AB_product = AB_product @ B_aug_collection[ii]
-                Cdb[n_aug * i:n_aug * i + n_aug,
-                    inputs * j:inputs * j + inputs] = AB_product
+            ri = n_aug * i
+            ci = inputs * i
+            Cdb[ri:ri + n_aug, ci:ci + inputs] = B_aug_collection[i]
+            if i > 0:
+                width = inputs * i
+                Cdb[ri:ri + n_aug, 0:width] = (
+                    A_aug_collection[i] @ Cdb[ri - n_aug:ri, 0:width])
 
         # ======================== Constraint assembly ========================
         Cdb_constraints = C_asterisk_global @ Cdb
@@ -313,12 +358,13 @@ class SupportFilesF1Tenth:
         y_min_diff = -y_asterisk_min_global + Adc_constraints_x0
         y_diff_global = np.concatenate((y_max_diff, y_min_diff))
 
-        G = np.vstack((I_mega_global, Cdb_constraints_global))
-        ht = np.concatenate((ublb_global, y_diff_global))
+        G = np.vstack((self._I_mega_global, Cdb_constraints_global))
+        ht = np.concatenate((self._ublb_global, y_diff_global))
 
         # ======================== QP cost ========================
-        Hdb = Cdb.T @ Qdb @ Cdb + Rdb
-        temp = Adc.T @ Qdb @ Cdb
+        QdbCdb = Qdb @ Cdb
+        Hdb = Cdb.T @ QdbCdb + Rdb
+        temp = Adc.T @ QdbCdb
         temp2 = -Tdb @ Cdb
         Fdbt = np.vstack((temp, temp2))
 

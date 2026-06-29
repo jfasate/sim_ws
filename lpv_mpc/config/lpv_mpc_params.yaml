@@ -3,18 +3,18 @@ lpv_mpc_node:
     # Waypoint / track
     map_name: 'icra'
     csv_path: ''          # Leave empty to auto-resolve from src/csv_data/<map_name>.csv
-    speed_scale: 0.60      # Scale waypoint speeds (start conservative, increase once stable)
+    speed_scale: 0.80      # Scale waypoint speeds (start conservative, increase once stable)
 
     # ROS topics
     odom_topic: '/ego_racecar/odom'
     drive_topic: '/drive'
 
     # QP solver ('cvxopt', 'osqp', 'ecos', 'scs')
-    qp_solver: 'cvxopt'
+    qp_solver: 'osqp'
 
     # MPC timing
     Ts: 0.02              # Sample time [s] (50 Hz control loop)
-    hz: 20                # Prediction horizon [steps] (20 * 0.02s = 0.4s)
+    hz: 30                # Prediction horizon [steps] (30 * 0.02s = 0.6s)
 
     # F1Tenth vehicle parameters (from f110_gym simulator)
     m: 3.74               # Mass [kg]
@@ -34,6 +34,6 @@ lpv_mpc_node:
     #   High psi weight   → follow heading (prevents oversteer/understeer)
     #   Moderate X/Y      → follow position without oscillation
     #   High R[0]         → smooth steering (prevents oscillation)
-    Q_diag: [500.0, 2500.0, 1200.0, 1200.0]
-    S_diag: [500.0, 2500.0, 1200.0, 1200.0]
+    Q_diag: [500.0, 2500.0, 1500.0, 1500.0]
+    S_diag: [500.0, 2500.0, 1500.0, 1500.0]
     R_diag: [55.0, 8.0]
